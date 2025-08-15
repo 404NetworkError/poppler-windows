@@ -1,0 +1,132 @@
+name: Update Poppler Version
+
+on:
+  workflow_dispatch:  # run manually
+  schedule:
+    - cron: '39 3 * * *'  # every day at 03:39 UTC
+
+jobs:
+  update-poppler:
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: 'master'
+
+      - name: Download conda-forge repository information
+        shell: bash
+        run: |
+          set -e
+          curl -L "https://conda.anaconda.org/conda-forge/win-64/repodata.json.zst" | zstd -d -o repodata.json
+
+      - name: Find latest Poppler version and build
+        id: get_version
+        shell: bash
+        run: |
+          latest_info=$(jq -r '
+            ."packages.conda"
+            | to_entries
+            | map(.value)
+            | map(select(.name == "poppler"))
+            | sort_by(
+                (.version | split(".") | map(tonumber)),
+                .build_number
+              )
+            | last
+            | {version: .version, build: .build_number}
+          ' repodata.json)
+          
+          latest_version=$(echo "$latest_info" | jq -r '.version')
+          latest_build=$(echo "$latest_info" | jq -r '.build')
+
+          echo "Latest Poppler version: $latest_version build $latest_build"
+          echo "version=$latest_version" >> "$GITHUB_OUTPUT"
+          echo "build=$latest_build" >> "$GITHUB_OUTPUT"
+
+      - name: Update package.sh if needed
+        id: update_version
+        shell: bash
+        run: |
+          current_version=$(grep '^POPPLER_VERSION=' package.sh | cut -d= -f2 | tr -d '"')
+          current_build=$(grep '^BUILD=' package.sh | cut -d= -f2 | tr -d '"')
+
+          latest_version=${{ steps.get_version.outputs.version }}
+          latest_build=${{ steps.get_version.outputs.build }}
+
+          if [ "$current_version" == "$latest_version" ] && [ "$current_build" == "$latest_build" ]; then
+            echo "Poppler version and build are already up to date (VER: $current_version, BUILD: $current_build). Stopping workflow."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Updating from $current_version-$current_build to $latest_version-$latest_build"
+          sed -i "s/^POPPLER_VERSION=.*/POPPLER_VERSION=$latest_version/" package.sh
+          sed -i "s/^BUILD=.*/BUILD=\"$latest_build\"/" package.sh
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create new branch for update
+        id: create_branch
+        if: steps.update_version.outputs.updated == 'true'
+        shell: bash
+        run: |
+          latest_version=${{ steps.get_version.outputs.version }}
+          latest_build=${{ steps.get_version.outputs.build }}
+          branch_name="update-poppler-$latest_version-$latest_build"
+
+          if git ls-remote --heads origin "$branch_name" | grep -q "$branch_name"; then
+            echo "Branch $branch_name already exists on remote. Skipping branch creation and PR."
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch -c "$branch_name"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.sh
+          git commit -m "Update Poppler to version $latest_version-$latest_build"
+          git push --set-upstream origin "$branch_name"
+
+          echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        if: |
+          steps.update_version.outputs.updated == 'true' &&
+          steps.create_branch.outputs.branch_exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          branch_name=${{ steps.create_branch.outputs.branch_name }}
+          full_version=${{ steps.get_version.outputs.version }}-${{ steps.get_version.outputs.build }}
+          pr_title="Update Poppler to $full_version"
+          pr_body=$(printf "Package for poppler v%s\n\n# Checklist:\n\n- [X] I have confirmed that [poppler-feedstock](https://github.com/conda-forge/poppler-feedstock) has been updated.\n- [X] I have bumped \`package.sh\` \`POPPLER_VERSION\` to the current build." "$full_version")
+          existing_pr=$(gh pr list --state open --json number,title,headRefName --jq '.[] | {number: .number, title: .title, head: .headRefName}')
+
+          existing_pr_branch=$(echo "$existing_pr" | jq -r "select(.head==\"$branch_name\") | .number")
+          if [ -n "$existing_pr_branch" ]; then
+            echo "A PR already exists for branch $branch_name (#$existing_pr_branch). Skipping PR creation."
+            echo "pr_exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          existing_pr_title=$(echo "$existing_pr" | jq -r "select(.title==\"$pr_title\") | .number")
+          if [ -n "$existing_pr_title" ]; then
+            echo "A PR already exists with title '$pr_title' (#$existing_pr_title). Skipping PR creation."
+            echo "pr_exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh pr create \
+            --title "$pr_title" \
+            --body "$pr_body" \
+            --head "$branch_name" \
+            --base "master"
+
+          echo "pr_exists=false" >> "$GITHUB_OUTPUT"
