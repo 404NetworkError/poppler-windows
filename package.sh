@@ -1,5 +1,6 @@
 POPPLER_VERSION=25.07.0
-POPPLER_DATA_URL="https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz"
+#POPPLER_DATA_URL="https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz"
+POPPLER_DATA_URL="https://github.com/404NetworkError/poppler-windows/releases/download/poppler-data-0.4.12/poppler-data-0.4.12.tar.gz"
 BUILD="0"
 
 set -e
@@ -38,7 +39,7 @@ rm -rf "$PKGS_PATH_DIR"
 
 mkdir -p share/poppler
 cd share || exit
-curl $POPPLER_DATA_URL --output poppler-data.tar.gz
+curl -L $POPPLER_DATA_URL --output poppler-data.tar.gz
 tar xvzf poppler-data.tar.gz -C poppler --strip-components 1
 rm poppler-data.tar.gz
 
